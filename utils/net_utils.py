@@ -1,3 +1,4 @@
+from turtle import forward
 import torch 
 import random 
 import numpy as np 
@@ -91,3 +92,113 @@ class ACMLoss(nn.Module):
         loss_dict["sparse_loss"] = sparse_loss.cpu().item()
         
         return loss, loss_dict
+
+class DomAdpLoss(nn.Module):
+    def __init__(self):
+        self.ce_d = nn.CrossEntropyLoss(reduction='none')
+
+    def forward(self):
+        # ------ Adversarial loss ------ #
+        num_class_domain = 2
+        loss_adv = 0
+        for c in range(num_class_domain):
+            pred_d_class = pred_d_stage[:, c, :]  # (batch x frame#, 2)
+            label_d_class = label_d_stage[:, c]  # (batch x frame#)
+
+            loss_adv_class = self.ce_d(pred_d_class, label_d_class)
+            if weighted_domain_loss == 'Y' and multi_adv[1] == 'Y':  # weighted by class prediction
+                if ps_lb == 'soft':
+                    loss_adv_class *= classweight_stage[:, c].detach()
+                elif ps_lb == 'hard':
+                    loss_adv_class *= classweight_stage_hardmask[:, c].detach()
+
+            loss_adv += loss_adv_class.mean()
+
+        loss += loss_adv
+
+        #if 'rev_grad' in DA_adv_video:
+        loss_adv_video = self.ce_d(pred_d_video_stage, label_d_video_stage)
+        loss += loss_adv_video.mean()
+        
+        return
+
+class BMNLoss(nn.Module):
+    def __init__(self):
+        super(BMNLoss, self).__init__()
+        
+        self.ce_d = nn.CrossEntropyLoss(reduction='none')
+    
+    def forward(self,pred_start, pred_end, gt_start, gt_end):
+        #pred_bm = confidence_map, gt_iou_map = label_confidence
+        tem_loss = self.tem_loss_func(pred_start, pred_end, gt_start, gt_end)
+
+        loss = tem_loss 
+        return loss, tem_loss
+
+
+    def tem_loss_func(self,pred_start, pred_end, gt_start, gt_end):
+        #weighted binary logistic regression loss function, following BSN
+        def bi_loss(pred_score, gt_label):
+            device = pred_score.device
+            pred_score = pred_score.view(-1)
+            gt_label = gt_label.view(-1)
+            pmask = (gt_label > 0.5).float() #bi => value is {0,1} => 0 or 1
+            num_entries = len(pmask)
+            num_positive = torch.sum(pmask)
+            ratio = num_entries / num_positive #alpha_+
+            #ratio / (ratio - 1) = alpha_-
+            coef_0 = 0.5 * ratio / (ratio - 1)
+            coef_1 = 0.5 * ratio #alpha_+
+            epsilon = 0.000001
+
+            pmask = pmask.to(device)
+
+            loss_pos = coef_1 * torch.log(pred_score + epsilon) * pmask
+            loss_neg = coef_0 * torch.log(1.0 - pred_score + epsilon) * (1.0 - pmask)
+            loss = -1 * torch.mean(loss_pos + loss_neg)
+            return loss
+
+        loss_start = bi_loss(pred_start, gt_start)
+        loss_end = bi_loss(pred_end, gt_end)
+        loss = loss_start + loss_end
+        return loss
+
+
+
+class SniCoLoss(nn.Module):
+    #HA refinement aims to transform the hard action snippet features by driving hard action and easy action snippets compactly in feature space"
+    def __init__(self):
+        super(SniCoLoss, self).__init__()
+        self.ce_criterion = nn.CrossEntropyLoss()
+
+    def NCE(self, q, k, neg, T=0.07): #Negative cross entropy
+        # q size = nx2d = ndata x channel
+        q = nn.functional.normalize(q, dim=1) # normalized unit sphere to prevent collapsing or expanding
+        k = nn.functional.normalize(k, dim=1) # normalized unit sphere to prevent collapsing or expanding
+        neg = neg.permute(0,2,1)
+        neg = nn.functional.normalize(neg, dim=1) # normalized unit sphere to prevent collapsing or expanding
+        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1) #positive query exp(xT.x+) nc.cn
+        l_neg = torch.einsum('nc,nck->nk', [q, neg]) # sum(negative query xT.xs-)
+        logits = torch.cat([l_pos, l_neg], dim=1)
+        logits /= T #Temperature
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
+        loss = self.ce_criterion(logits, labels)
+
+        return loss
+
+    def forward(self, contrast_pairs):
+
+        HA_refinement = self.NCE(
+            torch.mean(contrast_pairs['HA'], 1),  #x
+            torch.mean(contrast_pairs['EA'], 1),  #x+
+            contrast_pairs['EB'] #x-
+        )
+
+        HB_refinement = self.NCE(
+            torch.mean(contrast_pairs['HB'], 1), #x
+            torch.mean(contrast_pairs['EB'], 1), #x+
+            contrast_pairs['EA'] #x-
+        )
+
+        loss = HA_refinement + HB_refinement
+        return loss

@@ -91,9 +91,9 @@ _DATASET_HYPER_PARAMS = {
         "action_cls_num":len(_CLASS_NAME["ActivityNet"]),
         "cls_threshold":0.10,
         "test_upgrade_scale":20,
-        "data_dir":"./data/ActivityNet13",
+        "data_dir":"/mnt/d/Dataset/ActivityNet1-3_ACMfeat/features",
         # "data_dir":"/DATA/W-TAL/ActivityNet13/features",
-        "test_gt_file":"./data/ActivityNet13/gt.json",
+        "test_gt_file":"/mnt/d/Dataset/ActivityNet1-3_ACMfeat/gt.json",
         "tiou_thresholds":np.arange(0.50, 1.00, 0.05),
         "nms_thresh":0.90,
         
@@ -104,6 +104,65 @@ _DATASET_HYPER_PARAMS = {
         "loss_lamb_1":5e-3,
         "loss_lamb_2":5e-5,
         "loss_lamb_3":0e-4,  
+    },
+
+    "HACS":{
+        "dropout":0.7,
+        "lr":1e-4,
+        "weight_decay":0.001,
+        "frames_per_sec":25,
+        "segment_frames_num":16, #number of frames clips as input
+        "sample_segments_num":75,
+        
+        "feature_dim":2048,
+        "action_cls_num":len(_CLASS_NAME["ActivityNet"]),
+        "cls_threshold":0.10,
+        "test_upgrade_scale":20,
+        "data_dir":"/mnt/d/Dataset/hacs_segments_features_I3D/hacs_segments_features",
+        # "data_dir":"/DATA/W-TAL/ActivityNet13/features",
+        "test_gt_file":"/mnt/d/Dataset/hacs_segments_features_I3D/HACS_segments_v1.1.1.json",
+        "tiou_thresholds":np.arange(0.50, 1.00, 0.05),
+        "nms_thresh":0.90,
+        
+        "ins_topk_seg":2,
+        "con_topk_seg":10,
+        "bak_topk_seg":10,
+        
+        "loss_lamb_1":5e-3,
+        "loss_lamb_2":5e-5,
+        "loss_lamb_3":0e-4,     
+    },  
+
+    "HACStoAct":{
+        "dropout":0.7,
+        "lr":1e-4,
+        "weight_decay":0.001,
+        "frames_per_sec":25,
+        "segment_frames_num":16, #number of frames clips as input
+        "sample_segments_num":75,
+        
+        "feature_dim":2048,
+        "action_cls_num":len(_CLASS_NAME["ActivityNet"]),
+        "cls_threshold":0.10,
+        "test_upgrade_scale":20,
+        "src_data_dir":"/mnt/d/Dataset/hacs_segments_features_I3D/features",
+        "src_test_gt_file":"/mnt/d/Dataset/hacs_segments_features_I3D/gt.json",
+        "tgt_data_dir":"/mnt/d/Dataset/ActivityNet1-3_ACMfeat/features",
+        "tgt_test_gt_file":"/mnt/d/Dataset/ActivityNet1-3_ACMfeat/gt.json",
+        "tiou_thresholds":np.arange(0.50, 1.00, 0.05),
+        "nms_thresh":0.90,
+        
+        "ins_topk_seg":2,
+        "con_topk_seg":10,
+        "bak_topk_seg":10,
+        
+        "loss_lamb_1":5e-3,
+        "loss_lamb_2":5e-5,
+        "loss_lamb_3":0e-4,  
+        "r_easy": 5,
+        "r_hard": 20,
+        "m" : 3,
+        "M" : 6
     }} 
 
 def build_args(dataset=None):
@@ -125,7 +184,10 @@ def build_args(dataset=None):
     if dataset is not None:
         args.dataset = dataset
     # Based on the selected dataset, we set dataset specific hyper-params. 
-    args.class_name_lst = _CLASS_NAME[args.dataset]
+    if args.dataset == "HACStoAct":
+        args.class_name_lst = _CLASS_NAME['ActivityNet']
+    else:
+        args.class_name_lst = _CLASS_NAME[args.dataset]
     args.action_cls_num = _DATASET_HYPER_PARAMS[args.dataset]["action_cls_num"]
     
     args.dropout = _DATASET_HYPER_PARAMS[args.dataset]["dropout"]
@@ -139,8 +201,12 @@ def build_args(dataset=None):
     
     args.cls_threshold = _DATASET_HYPER_PARAMS[args.dataset]["cls_threshold"]
     args.tiou_thresholds = _DATASET_HYPER_PARAMS[args.dataset]["tiou_thresholds"]
-    args.test_gt_file_path = _DATASET_HYPER_PARAMS[args.dataset]["test_gt_file"]
-    args.data_dir = _DATASET_HYPER_PARAMS[args.dataset]["data_dir"]
+    #args.test_gt_file_path = _DATASET_HYPER_PARAMS[args.dataset]["test_gt_file"]
+    args.src_test_gt_file_path = _DATASET_HYPER_PARAMS[args.dataset]["src_test_gt_file"]
+    args.tgt_test_gt_file_path = _DATASET_HYPER_PARAMS[args.dataset]["tgt_test_gt_file"]
+    #args.data_dir = _DATASET_HYPER_PARAMS[args.dataset]["data_dir"]
+    args.src_data_dir = _DATASET_HYPER_PARAMS[args.dataset]["src_data_dir"]
+    args.tgt_data_dir = _DATASET_HYPER_PARAMS[args.dataset]["tgt_data_dir"]
 
     args.test_upgrade_scale = _DATASET_HYPER_PARAMS[args.dataset]["test_upgrade_scale"]
     args.nms_thresh = _DATASET_HYPER_PARAMS[args.dataset]["nms_thresh"]
@@ -152,5 +218,11 @@ def build_args(dataset=None):
     args.loss_lamb_1  = _DATASET_HYPER_PARAMS[args.dataset]["loss_lamb_1"]
     args.loss_lamb_2  = _DATASET_HYPER_PARAMS[args.dataset]["loss_lamb_2"]
     args.loss_lamb_3  = _DATASET_HYPER_PARAMS[args.dataset]["loss_lamb_3"]
+
+    args.r_easy  = _DATASET_HYPER_PARAMS[args.dataset]["r_easy"]
+    args.r_hard  = _DATASET_HYPER_PARAMS[args.dataset]["r_hard"]
+
+    args.m  = _DATASET_HYPER_PARAMS[args.dataset]["m"]
+    args.M  = _DATASET_HYPER_PARAMS[args.dataset]["M"]
  
     return args
