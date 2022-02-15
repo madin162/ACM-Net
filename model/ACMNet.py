@@ -3,6 +3,7 @@ import torch.nn as nn
 from itertools import compress
 import numpy as np
 from scipy import ndimage
+from itertools import combinations
 from torch.autograd import Function
 
 beta = [-2, -2]
@@ -120,6 +121,51 @@ class ACMNet(nn.Module):
                act_inst_feat, act_cont_feat, act_back_feat,\
                temp_att, act_inst_cas, act_cas, act_cont_cas, act_back_cas
 
+
+class AdvDomainClsBase(nn.Module):
+    def __init__(self, in_feat, hidden_size, type_adv, args):
+        super(AdvDomainClsBase, self).__init__()
+        # ====== collect arguments ====== #
+        self.num_f_maps = in_feat
+
+        self.fc1 = nn.Linear(in_feat, hidden_size)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout()
+        self.type_adv='frames'
+
+    def forward(self, input_data, beta):
+        feat = GradRevLayer.apply(input_data, beta)
+        if self.type_adv == "video" and self.DA_adv_video == "rev_grad_ssl_2":
+            num_seg = int(input_data.size(-1) / self.num_f_maps)
+            feat = feat.reshape(
+                -1, num_seg, self.num_f_maps
+            )  # reshape --> (video#, seg#, dim)
+
+            # get the pair indices
+            id_pair = torch.tensor(
+                list(combinations(range(num_seg), 2))
+            ).long()  # all possible indices
+            if self.pair_ssl == "adjacent":
+                id_pair = torch.tensor([(i, i + 1)
+                                        for i in range(num_seg - 1)])
+            if input_data.get_device() >= 0:
+                id_pair = id_pair.to(input_data.get_device())
+
+            # get the pairwise features
+            feat = feat[:, id_pair, :]  # (video#, pair#, 2, dim)
+            # (video# x pair#, 2 x dim)
+            feat = feat.reshape(-1, self.num_f_maps * 2)
+            feat = self.fc_pair(feat)  # (video# x pair#, dim)
+            feat = feat.reshape(
+                -1, id_pair.size(0) * self.num_f_maps
+            )  # (video#, pair# x dim)
+
+        feat = self.fc1(feat)
+        feat = self.relu(feat)
+        feat = self.dropout(feat)
+
+        return feat
+
 class ACMNet_da(nn.Module):
     def __init__(self, args):
         super(ACMNet_da, self).__init__()
@@ -167,6 +213,11 @@ class ACMNet_da(nn.Module):
             nn.Conv1d(self.feature_dim, 1, kernel_size=1),
             nn.Sigmoid()
         )
+        num_f_maps = 2048
+        self.ad_net_base = nn.ModuleList()
+        self.ad_net_base += [AdvDomainClsBase(num_f_maps,num_f_maps, "frame",args)]
+        self.ad_net_cls = nn.ModuleList()
+        self.ad_net_cls += [nn.Linear(num_f_maps, 2)]
 
     def select_topk_embeddings(self, scores, embeddings, k):
         _, idx_DESC = scores.sort(descending=True, dim=1)
@@ -343,8 +394,8 @@ class ACMNet_da(nn.Module):
         return (pred_d,label_d)
 
     def predict_domain_frame(self, feat, beta_value):
-        dim_feat = feat.size(1)
-        num_frame = feat.size(2)
+        dim_feat = feat.size(2)
+        num_frame = feat.size(1)
         feat = feat.transpose(1, 2).reshape(-1, dim_feat)  # reshape to (batch x frame#, dim) [400, 256]
         out = self.ad_net_base[0](feat, beta_value)
         out = self.ad_net_cls[0](out)  # (batch x frame#, 2)
@@ -381,12 +432,12 @@ class ACMNet_da(nn.Module):
         end = self.x_1d_e(embeded_feature)
         return start, end
 
-    def forward_stage(self, out_feat, beta, mask, domain_GT):
+    def forward_stage(self, out_feat, beta, domain_GT):
         out_d = self.predict_domain_frame(
             out_feat, beta[0]
         )
         
-        out_feat_video = self.aggregate_frames(out_d, mask)
+        #out_feat_video = self.aggregate_frames(out_d, mask)
 
 
         # === Select valid frames + Generate domain labels === #

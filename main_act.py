@@ -4,6 +4,7 @@ import time
 import pickle
 from unittest import result
 from tqdm import tqdm 
+import torch.nn as nn
 
 import torch 
 import wandb 
@@ -264,6 +265,7 @@ def train_source(args, model, dataloader, criterion, strg_criterion, optimizer):
 
 
 def train_da(args, model, tgt_dataloader, src_dataloader, criterion, strg_criterion, da_bkg_snip_criterion, optimizer):
+    ce_d = nn.CrossEntropyLoss(reduction='none')
     model.train()
     print("-------------------------------------------------------------------------------")
     device = args.device
@@ -333,15 +335,19 @@ def train_da(args, model, tgt_dataloader, src_dataloader, criterion, strg_criter
         # Feature alignment
 
         actionness = act_cas.sum(dim=2)
-        #contrast_pairs = model.create_contrast_pairs(actionness,src_bkg_feat)
         contrast_pairs = model.create_contrast_pairs(tgt_input_feature,src_bkg_feat,src_act_feat)
-        #print(contrast_pairs['EA'].shape)
-        #print(contrast_pairs['EB'].shape)
-        #print(contrast_pairs['HA'].shape)
-        #print(contrast_pairs['HB'].shape)
         snip_loss = da_bkg_snip_criterion(contrast_pairs)
 
-        loss =  tgt_loss + src_loss + snip_loss
+        #Domain adversarial learning
+        pred_d, label_d = model.forward_dom_pred(src_input_feature,tgt_input_feature, reverse=False)
+        loss_adv = 0
+        num_class_domain = pred_d.size(2)
+        pred_d = pred_d.squeeze(1)
+        label_d = label_d.squeeze(1)
+        loss_adv = ce_d(pred_d,label_d)
+        da_loss = 0.1*loss_adv.mean()
+
+        loss =  tgt_loss + src_loss + snip_loss + da_loss
 
         optimizer.zero_grad()
         if not torch.isnan(loss):
@@ -580,7 +586,7 @@ def test(args, model, dataloader, criterion, phase="test"):
     with open(test_final_json_path, 'w') as f:
         json.dump(test_final_result, f)
     
-    anet_detection = ANETDetection(ground_truth_file=args.test_gt_file_path,
+    anet_detection = ANETDetection(ground_truth_file=args.tgt_test_gt_file_path,
                     prediction_file=test_final_json_path,
                     tiou_thresholds=args.tiou_thresholds,
                     subset="val")

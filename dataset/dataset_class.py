@@ -187,8 +187,8 @@ class SourceVidDataset(data.Dataset):
 
         # Additional
         
-        self.anchor_xmin = [self.temporal_gap * (i - 0.5) for i in range(self.temporal_scale)]
-        self.anchor_xmax = [self.temporal_gap * (i + 0.5) for i in range(self.temporal_scale)]
+        self.anchor_xmin = np.array([self.temporal_gap * (i - 0.5) for i in range(self.temporal_scale)])
+        self.anchor_xmax = np.array([self.temporal_gap * (i + 0.5) for i in range(self.temporal_scale)])
         self.get_label()
 
     def __getitem__(self, idx):
@@ -273,9 +273,6 @@ class SourceVidDataset(data.Dataset):
             #                            [self.temporal_scale, self.temporal_scale])
             #gt_iou_map.append(tmp_gt_iou_map)
 
-        anchor_xmin = [temporal_gap * (i - 0.5) for i in range(temporal_scale)]
-        anchor_xmax = [temporal_gap * (i + 0.5) for i in range(temporal_scale)]
-
         # generate R_s and R_e
         # starting and ending region
         gt_bbox = np.array(gt_bbox)
@@ -312,13 +309,14 @@ class SourceVidDataset(data.Dataset):
         gt_nonact_bbox.append((gt_start_nonact[-1],1))
 
 
-        anchor_xs = list(zip(anchor_xmin,anchor_xmax))
+        #anchor_xs = list(zip(anchor_xmin,anchor_xmax))
         #Assign backgroun label to each segment
         list_bkg_lbl=[]
-        for anchor_now in anchor_xs:
+        for id_anc in range(len(anchor_xmax)):
+        #for anchor_now in anchor_xs:
             tem_bak = 0
             for bound in gt_nonact_bbox:
-                if((max(0,anchor_now[0])>=bound[0]) and (min(anchor_now[1],1)<=bound[1])):
+                if((max(0,anchor_xmin[id_anc])>=bound[0]) and (min(anchor_xmax[id_anc],1)<=bound[1])):
                     tem_bak = 1
                     break
             list_bkg_lbl.append(tem_bak)
