@@ -135,20 +135,21 @@ _DATASET_HYPER_PARAMS = {
 
     "HACStoAct":{
         "dropout":0.7,
-        "lr":1e-4,
+        "lr":4e-4,
         "weight_decay":0.001,
         "frames_per_sec":25,
         "segment_frames_num":16, #number of frames clips as input
         "sample_segments_num":75,
         
         "feature_dim":2048,
+        "feature_dim_2":256,
         "action_cls_num":len(_CLASS_NAME["ActivityNet"]),
         "cls_threshold":0.10,
         "test_upgrade_scale":20,
-        "src_data_dir":"/mnt/d/Dataset/hacs_segments_features_I3D/features",
-        "src_test_gt_file":"/mnt/d/Dataset/hacs_segments_features_I3D/gt.json",
-        "tgt_data_dir":"/mnt/d/Dataset/ActivityNet1-3_ACMfeat/features",
-        "tgt_test_gt_file":"/mnt/d/Dataset/ActivityNet1-3_ACMfeat/gt.json",
+        "src_data_dir":"/mnt/server10_hard2/adi/Datasets/HACS_I3D/hacs_segments_features",
+        "src_test_gt_file":"/mnt/server10_hard2/adi/Datasets/HACS_I3D/hacs_segments_features/gt.json",
+        "tgt_data_dir":"/mnt/server10_hard2/adi/Datasets/ActivityNet1-3_ACMfeat",
+        "tgt_test_gt_file":"/mnt/server10_hard2/adi/Datasets/ActivityNet1-3_ACMfeat/gt.json",
         "tiou_thresholds":np.arange(0.50, 1.00, 0.05),
         "nms_thresh":0.90,
         
@@ -162,8 +163,51 @@ _DATASET_HYPER_PARAMS = {
         "r_easy": 5,
         "r_hard": 20,
         "m" : 3,
-        "M" : 6
-    }} 
+        "M" : 6,
+
+        "prop_boundary_ratio": 0.5,
+        "num_sample": 32,
+        "num_sample_perbin": 3
+    },
+    
+        "ActtoHACS":{
+        "dropout":0.7,
+        "lr":1e-3,
+        #"weight_decay":0.001,
+        "weight_decay":1e-4,
+        "frames_per_sec":25,
+        "segment_frames_num":16, #number of frames clips as input
+        "sample_segments_num":75,
+        
+        "feature_dim":2048,
+        "feature_dim_2":256,
+        "action_cls_num":len(_CLASS_NAME["ActivityNet"]),
+        "cls_threshold":0.10,
+        "test_upgrade_scale":20,
+        "src_data_dir":"/mnt/server10_hard2/adi/Datasets/ActivityNet1-3_ACMfeat",
+        "src_test_gt_file":"/mnt/server10_hard2/adi/Datasets/ActivityNet1-3_ACMfeat/gt.json",
+        "tgt_data_dir":"/mnt/server10_hard2/adi/Datasets/HACS_I3D/hacs_segments_features",
+        "tgt_test_gt_file":"/mnt/server10_hard2/adi/Datasets/HACS_I3D/hacs_segments_features/gt.json",
+        "tiou_thresholds":np.arange(0.50, 1.00, 0.05),
+        "nms_thresh":0.90,
+        
+        "ins_topk_seg":2,
+        "con_topk_seg":10,
+        "bak_topk_seg":10,
+        
+        "loss_lamb_1":5e-3,
+        "loss_lamb_2":5e-5,
+        "loss_lamb_3":0e-4,  
+        "r_easy": 5,
+        "r_hard": 20,
+        "m" : 3,
+        "M" : 6,
+
+        "prop_boundary_ratio": 0.5,
+        "num_sample": 32,
+        "num_sample_perbin": 3
+    }
+    } 
 
 def build_args(dataset=None):
     
@@ -173,18 +217,21 @@ def build_args(dataset=None):
     parser.add_argument("--start_epoch", default=0, type=int)
     parser.add_argument("--gpu", default='0', type=str)
     parser.add_argument("--num_workers", default=6, type=int)
-    parser.add_argument("--dataset", default="THUMOS", type=str)
+    parser.add_argument("--dataset", default="HACStoAct", type=str)
     parser.add_argument("--batch_size", default=16, type=int)
     parser.add_argument("--epochs", default=1000, type=int)
-    
     parser.add_argument("--without_wandb", action="store_true")
     parser.add_argument("--test", action="store_true")
+    parser.add_argument("--train_mode", default="da", type=str)
+    parser.add_argument("--gpu_mode", default="single", type=str)
     
     args = parser.parse_args()
     if dataset is not None:
         args.dataset = dataset
     # Based on the selected dataset, we set dataset specific hyper-params. 
     if args.dataset == "HACStoAct":
+        args.class_name_lst = _CLASS_NAME['ActivityNet']
+    elif args.dataset == "ActtoHACS":
         args.class_name_lst = _CLASS_NAME['ActivityNet']
     else:
         args.class_name_lst = _CLASS_NAME[args.dataset]
@@ -198,6 +245,7 @@ def build_args(dataset=None):
     args.segment_frames_num = _DATASET_HYPER_PARAMS[args.dataset]["segment_frames_num"]
     args.sample_segments_num = _DATASET_HYPER_PARAMS[args.dataset]["sample_segments_num"]
     args.feature_dim =  _DATASET_HYPER_PARAMS[args.dataset]["feature_dim"]
+    args.feature_dim_2 =  _DATASET_HYPER_PARAMS[args.dataset]["feature_dim_2"]
     
     args.cls_threshold = _DATASET_HYPER_PARAMS[args.dataset]["cls_threshold"]
     args.tiou_thresholds = _DATASET_HYPER_PARAMS[args.dataset]["tiou_thresholds"]
@@ -224,5 +272,9 @@ def build_args(dataset=None):
 
     args.m  = _DATASET_HYPER_PARAMS[args.dataset]["m"]
     args.M  = _DATASET_HYPER_PARAMS[args.dataset]["M"]
+    
+    args.prop_boundary_ratio  = _DATASET_HYPER_PARAMS[args.dataset]["prop_boundary_ratio"]
+    args.num_sample  = _DATASET_HYPER_PARAMS[args.dataset]["num_sample"]
+    args.num_sample_perbin  = _DATASET_HYPER_PARAMS[args.dataset]["num_sample_perbin"]
  
     return args

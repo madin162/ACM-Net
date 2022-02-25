@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd 
 from torch.utils.data import Dataset 
 import torch.utils.data as data
+from torch.functional import F
 
 import numpy as np
 
@@ -157,7 +158,7 @@ def build_dataset(args, phase="train", sample="random"):
 
 class SourceVidDataset(data.Dataset):
     
-    def __init__(self, args, phase="train", sample="random"):
+    def __init__(self, args, phase="train", sample="random", get_bound=False):
         
         self.sample_segments_num = args.sample_segments_num
         self.temporal_scale = self.sample_segments_num
@@ -167,6 +168,7 @@ class SourceVidDataset(data.Dataset):
         self.sample = sample
         self.data_dir = args.src_data_dir 
         self.sample_segments_num = args.sample_segments_num
+        self.get_bound = get_bound
 
         with open(os.path.join(self.data_dir, "gt.json")) as gt_f:
             self.gt_dict = json.load(gt_f)["database"]
@@ -202,16 +204,23 @@ class SourceVidDataset(data.Dataset):
         
         if self.sample == "random":
             con_vid_spd_feature = random_sample(con_vid_feature, self.sample_segments_num)
+            con_vid_spd_feature = torch.as_tensor(con_vid_spd_feature.astype(np.float32)) #input_feature
+        elif self.sample == "interpolate":
+            con_vid_spd_feature = torch.Tensor(con_vid_feature)
+            con_vid_spd_feature = torch.transpose(con_vid_spd_feature, 0, 1)
+            if con_vid_spd_feature.shape[0]!=self.temporal_scale: # rescale to fixed shape
+                con_vid_spd_feature = F.interpolate(con_vid_spd_feature.unsqueeze(0), size=self.temporal_scale, mode='linear',align_corners=False)[0,...]
+            con_vid_spd_feature = torch.transpose(con_vid_spd_feature, 0, 1)
         else:
             con_vid_spd_feature = uniform_sample(con_vid_feature, self.sample_segments_num)
-        
-        con_vid_spd_feature = torch.as_tensor(con_vid_spd_feature.astype(np.float32)) #input_feature
+            con_vid_spd_feature = torch.as_tensor(con_vid_spd_feature.astype(np.float32)) #input_feature
         
         vid_label_t = torch.as_tensor(vid_label.astype(np.float32)) #video-level label
         
-        label_start, label_end, sample_bkg_idx, sample_act_idx = self._get_train_prop_label(idx,self.anchor_xmin,self.anchor_xmax)
+        label_start, label_end, sample_bkg_idx, sample_act_idx, gt_iou_map = self._get_train_prop_label(idx,self.anchor_xmin,self.anchor_xmax)
         
         init_tensor = torch.zeros(self.sample_segments_num,2048)
+        sample_bkg_idx = np.clip(sample_bkg_idx, 0, len(con_vid_spd_feature)-1)
         if sample_bkg_idx.size>1:
             sample_bkg_feat = con_vid_spd_feature[sample_bkg_idx,:]
             init_tensor[:len(sample_bkg_idx),:]=sample_bkg_feat
@@ -220,6 +229,7 @@ class SourceVidDataset(data.Dataset):
 
 
         init_tensor = torch.zeros(self.sample_segments_num,2048)
+        sample_act_idx = np.clip(sample_act_idx, 0, len(con_vid_spd_feature)-1)
         if sample_act_idx.size>1:
             sample_act_feat = con_vid_spd_feature[sample_act_idx,:]
             init_tensor[:len(sample_act_idx),:]=sample_act_feat
@@ -227,10 +237,14 @@ class SourceVidDataset(data.Dataset):
         sample_act_feat = init_tensor
 
         if self.phase == "train":
-            return con_vid_spd_feature, vid_label_t, label_start, label_end, sample_bkg_feat, sample_act_feat
+            return con_vid_spd_feature, vid_label_t, gt_iou_map, label_start, label_end, sample_bkg_feat, sample_act_feat
         else:
-            return vid_name, con_vid_spd_feature, vid_label_t, vid_len, vid_duration
+            if self.get_bound == True:
+                return vid_name, con_vid_spd_feature, vid_label_t,gt_iou_map, label_start, label_end, vid_len, vid_duration
+            else:
+                return vid_name, con_vid_spd_feature, vid_label_t, vid_len, vid_duration
 
+        
     def get_label(self):
         
         self.label_dict = {}
@@ -267,12 +281,8 @@ class SourceVidDataset(data.Dataset):
             tmp_start = max(min(1, tmp_info['segment'][0] / corrected_second), 0)
             tmp_end = max(min(1, tmp_info['segment'][1] / corrected_second), 0)
             gt_bbox.append([tmp_start, tmp_end])
-            #tmp_gt_iou_map = iou_with_anchors(
-            #    self.match_map[:, 0], self.match_map[:, 1], tmp_start, tmp_end)
-            #tmp_gt_iou_map = np.reshape(tmp_gt_iou_map,
-            #                            [self.temporal_scale, self.temporal_scale])
-            #gt_iou_map.append(tmp_gt_iou_map)
 
+        #####################################################################################################
         # generate R_s and R_e
         # starting and ending region
         gt_bbox = np.array(gt_bbox)
@@ -284,12 +294,19 @@ class SourceVidDataset(data.Dataset):
         gt_end_bboxs = np.stack((gt_xmaxs - gt_len_small / 2, gt_xmaxs + gt_len_small / 2), axis=1)
         #####################################################################################################
 
+        gt_iou_map = np.zeros([self.temporal_scale, self.temporal_scale])
+        for i in range(self.temporal_scale):
+            for j in range(i, self.temporal_scale):
+                gt_iou_map[i, j] = np.max(
+                    iou_with_anchors(i * self.temporal_gap, (j + 1) * self.temporal_gap, gt_xmins, gt_xmaxs))
+        gt_iou_map = torch.Tensor(gt_iou_map)
+
+
         # calculate the ioa for all timestamp
         match_score_start = []
         for jdx in range(len(anchor_xmin)):
             match_score_start.append(np.max(
                 ioa_with_anchors(anchor_xmin[jdx], anchor_xmax[jdx], gt_start_bboxs[:, 0], gt_start_bboxs[:, 1])))
-    
         match_score_end = []
         for jdx in range(len(anchor_xmin)):
             match_score_end.append(np.max(
@@ -327,11 +344,11 @@ class SourceVidDataset(data.Dataset):
 
         src_act_list = (list_bkg_lbl == 0).nonzero()
         src_act_idx=src_act_list.numpy().squeeze()
-        return match_score_start, match_score_end, src_bkg_idx, src_act_idx
+        return match_score_start, match_score_end, src_bkg_idx, src_act_idx, gt_iou_map
 
-def build_src_dataset(args, phase="train", sample="random"):
+def build_src_dataset(args, phase="train", sample="random", get_bound=False):
     
-    return SourceVidDataset(args, phase, sample)
+    return SourceVidDataset(args, phase, sample, get_bound)
 
 class TargetVidDataset(Dataset):
     
@@ -402,9 +419,10 @@ class TargetVidDataset(Dataset):
         else:
             return vid_name, con_vid_spd_feature, vid_label_t, vid_len, vid_duration
 
-def build_tgt_dataset(args, phase="train", sample="random"):
+def build_tgt_dataset(args, phase="train", sample="random", get_bound=False):
     
     return TargetVidDataset(args, phase, sample)
+
 
 
 def load_json(file):

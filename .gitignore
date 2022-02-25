@@ -139,3 +139,5 @@ checkpoints_acmnet
 
 # data
 #./data/*
+output
+reports

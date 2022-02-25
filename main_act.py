@@ -1,3 +1,4 @@
+from cmath import nan
 import os 
 import json 
 import time
@@ -13,10 +14,11 @@ from torch.utils.data import DataLoader
 
 from config.model_config import build_args 
 from dataset.dataset_class import build_tgt_dataset, build_src_dataset
-from model.ACMNet import ACMNet_da
+from model.ACMNet import ACMNet_da, ACMNet_src, ACMNet_bmn
 from utils.net_utils import set_random_seed, ACMLoss, SniCoLoss, DomAdpLoss, BMNLoss
 from utils.net_evaluation import ANETDetection, upgrade_resolution, get_proposal_oic, nms, result2json
-
+from itertools import cycle
+import pandas as pd
 
 """   
 #---------------------------------------------------------------------------------------------------------------#
@@ -152,6 +154,69 @@ def train(args, model, dataloader, criterion, optimizer):
     
     return train_log_dict
 
+def get_mask(tscale):
+    mask = np.zeros([tscale, tscale], np.float32)
+    for i in range(tscale):
+        for j in range(i, tscale):
+            mask[i, j] = 1
+    return torch.Tensor(mask)
+
+def train_bmn(args, model, dataloader, criterion, strg_criterion, optimizer,epoch):
+    model.train()
+    print("-------------------------------------------------------------------------------")
+    device = args.device
+    
+    # train_process
+    epoch_pemreg_loss = 0
+    epoch_pemclr_loss = 0
+    epoch_tem_loss = 0
+    epoch_loss = 0
+    train_log_dict={}
+
+    bm_mask = get_mask(args.sample_segments_num)
+
+
+    for n_iter, (src_input_feature, src_vid_label_t, gt_iou_map, label_start, label_end, sample_bkg_feat, sample_act_feat) in enumerate(tqdm(dataloader)):
+
+        #debug
+        if(n_iter>3):
+            break
+
+        gt_iou_map = gt_iou_map.cuda()
+        bm_mask = bm_mask.cuda()
+        src_vid_label_t = src_vid_label_t.to(device)
+        src_input_feature = src_input_feature.to(device)
+        
+        src_start, src_end, confidence_map=model(src_input_feature)
+        
+        # Strong supervision learning
+        loss = strg_criterion(confidence_map,src_start,src_end,gt_iou_map,label_start, label_end, bm_mask)
+        
+        optimizer.zero_grad()
+        #loss[0].backward()
+        #if not torch.isnan(loss[0]):
+        loss[0].backward()
+        optimizer.step()
+
+        epoch_pemreg_loss += loss[2].cpu().detach().numpy()
+        epoch_pemclr_loss += loss[3].cpu().detach().numpy()
+        epoch_tem_loss += loss[1].cpu().detach().numpy()
+        epoch_loss += loss[0].cpu().detach().numpy()
+        
+    print(
+    "BMN training loss(epoch %d): tem_loss: %.03f, pem class_loss: %.03f, pem reg_loss: %.03f, total_loss: %.03f" % (
+        epoch, epoch_tem_loss / (n_iter + 1),
+        epoch_pemclr_loss / (n_iter + 1),
+        epoch_pemreg_loss / (n_iter + 1),
+        epoch_loss / (n_iter + 1)))
+
+
+    
+    train_log_dict["epoch_loss"] = epoch_loss
+    return train_log_dict
+
+
+
 def train_source(args, model, dataloader, criterion, strg_criterion, optimizer):
     model.train()
     print("-------------------------------------------------------------------------------")
@@ -171,48 +236,28 @@ def train_source(args, model, dataloader, criterion, strg_criterion, optimizer):
     test_tmp_data_log_dict = {}
     test_final_result = {}
 
+    bm_mask = get_mask(args.sample_segments_num)
 
-    for input_feature, vid_label_t, label_start, label_end in tqdm(dataloader):
 
-        vid_label_t = vid_label_t.to(device)
-        input_feature = input_feature.to(device)
+    for src_input_feature, src_vid_label_t, gt_iou_map, label_start, label_end, sample_bkg_feat, sample_act_feat in tqdm(dataloader):
+
+        gt_iou_map = gt_iou_map.cuda()
+        bm_mask = bm_mask.cuda()
+        src_vid_label_t = src_vid_label_t.to(device)
+        src_input_feature = src_input_feature.to(device)
         
         # === Combined learning on source domain ===
+        src_act_inst_cls, src_act_cont_cls, src_act_back_cls,\
+        src_act_inst_feat, src_act_cont_feat, src_act_back_feat,\
+        src_temp_att, src_act_inst_cas, src_act_cas,\
+        src_start, src_end, confidence_map=model(src_input_feature)
 
         # weakly supervised learning
-        act_inst_cls, act_cont_cls, act_back_cls,\
-        act_inst_feat, act_cont_feat, act_back_feat,\
-        temp_att, act_inst_cas, act_cas, act_cont_cas, act_back_cas=model.forward_cas_map(input_feature)
-
-        src_weak_loss, src_weak_loss_dict = criterion(act_inst_cls, act_cont_cls, act_back_cls, vid_label_t, temp_att,\
-                                    act_inst_feat, act_cont_feat, act_back_feat, act_inst_cas) 
-
+        src_weak_loss, src_weak_loss_dict = criterion(src_act_inst_cls, src_act_cont_cls, src_act_back_cls, src_vid_label_t, src_temp_att,\
+                                    src_act_inst_feat, src_act_cont_feat, src_act_back_feat, src_act_inst_cas) 
+        
         # Strong supervision learning
-        start, end = model.forward_strong_sup(input_feature)
-        src_strg_loss = strg_criterion(start,end,label_start, label_end)[0]
-
-        #test_tmp_data_log_dict[vid_name[0]] = {}
-        #test_tmp_data_log_dict[vid_name[0]]["vid_len"] = vid_len
-        #test_tmp_data_log_dict[vid_name[0]]["temp_att_score_np"] = temp_att.cpu().numpy()
-        #test_tmp_data_log_dict[vid_name[0]]["temp_org_cls_score_np"] = act_cas.cpu().numpy()
-        #test_tmp_data_log_dict[vid_name[0]]["temp_ins_cls_score_np"] = act_inst_cas.cpu().numpy()
-        #test_tmp_data_log_dict[vid_name[0]]["temp_con_cls_score_np"] = act_cont_cas.cpu().numpy()
-        #test_tmp_data_log_dict[vid_name[0]]["temp_bak_cls_score_np"] = act_back_cas.cpu().numpy()
-
-        #test_final_result['results'][vid_name[0]] = generate_proposal(temp_cas, temp_att, score_np, test_tmp_data_log_dict, vid_name)
-        #result_prop = generate_proposal(temp_cas, temp_att, score_np, test_tmp_data_log_dict, vid_name)
-        #start = result_prop[2]
-        #end = result_prop[3]
-
-        # = model.forward_boundary_map
-
-        # get source embedded feature
-        #confidence_map, start, end = model.forward_bm(source_embedded_feature)
-        #loss = bmn_loss_func(confidence_map, start, end, label_confidence, label_start, label_end, bm_mask.cuda())
-
-        #model.forward_prop_gen()
-        #model.forward_dom()
-
+        src_strg_loss = strg_criterion(confidence_map,src_start,src_end,gt_iou_map,label_start, label_end, bm_mask)[0]
         loss = src_weak_loss + src_strg_loss
         
         optimizer.zero_grad()
@@ -221,8 +266,8 @@ def train_source(args, model, dataloader, criterion, strg_criterion, optimizer):
             optimizer.step()
         
         with torch.no_grad():
-            fg_score = act_inst_cls[:, :args.action_cls_num]
-            label_np = vid_label_t.cpu().numpy()
+            fg_score = src_act_inst_cls[:, :args.action_cls_num]
+            label_np = src_vid_label_t.cpu().numpy()
             score_np = fg_score.cpu().numpy()
             
             pred_np = np.zeros_like(score_np)
@@ -283,63 +328,60 @@ def train_da(args, model, tgt_dataloader, src_dataloader, criterion, strg_criter
     feat_loss_stack = []
 
     len_dataloader = max(len(tgt_dataloader), len(src_dataloader))-1
-    data_source_iter = iter(src_dataloader)
-    data_target_iter = iter(tgt_dataloader)
+    #data_source_iter = iter(src_dataloader)
+    #data_target_iter = iter(tgt_dataloader)
+    data_source_iter = cycle(src_dataloader)
+    data_target_iter = cycle(tgt_dataloader)
 
     
     for n_iter in tqdm(range(len_dataloader)):
-        try:
-            #src_input_feature, src_vid_label_t, gt_iou_map, label_start, label_end, src_bkg_list = data_source_iter.next()
-            src_input_feature, src_vid_label_t, label_start, label_end, src_bkg_feat, src_act_feat = data_source_iter.next()
-            tgt_input_feature, tgt_vid_label_t = data_target_iter.next()
-        except StopIteration:
-            data_source_iter = iter(src_dataloader)
-            data_target_iter = iter(tgt_dataloader)
-            #src_input_feature, src_vid_label_t, label_start, label_end = data_source_iter.next()
-            src_input_feature, src_vid_label_t, label_start, label_end, src_bkg_feat, src_act_feat = data_source_iter.next()
-            tgt_input_feature, tgt_vid_label_t = data_target_iter.next()
+        #try:
+        #    src_input_feature, src_vid_label_t, label_start, label_end, src_bkg_feat, src_act_feat = data_source_iter.next()
+        #    tgt_input_feature, tgt_vid_label_t = data_target_iter.next()
+        #except StopIteration:
+        #    data_source_iter = iter(src_dataloader)
+        #    data_target_iter = iter(tgt_dataloader)
+        #    src_input_feature, src_vid_label_t, label_start, label_end, src_bkg_feat, src_act_feat = data_source_iter.next()
+        #    tgt_input_feature, tgt_vid_label_t = data_target_iter.next()
+        
+        src_input_feature, src_vid_label_t, label_start, label_end, src_bkg_feat, src_act_feat = next(data_source_iter)
+        tgt_input_feature, tgt_vid_label_t = next(data_target_iter)
 
 
-        # === Weak-supervised learning on target domain ===
         tgt_vid_label_t = tgt_vid_label_t.to(device)
         tgt_input_feature = tgt_input_feature.to(device)
 
-        act_inst_cls, act_cont_cls, act_back_cls,\
-        act_inst_feat, act_cont_feat, act_back_feat,\
-        temp_att, act_inst_cas, _, _, _=model.forward_cas_map(tgt_input_feature)
-
-        tgt_act_inst_cls=act_inst_cls
-
-        tgt_loss, tgt_loss_dict = criterion(act_inst_cls, act_cont_cls, act_back_cls, tgt_vid_label_t, temp_att,\
-                                    act_inst_feat, act_cont_feat, act_back_feat, act_inst_cas)
-
-        # === Combined learning on source domain ===
-        
         src_vid_label_t = src_vid_label_t.to(device)
         src_input_feature = src_input_feature.to(device)
 
-        # weakly supervised learning
-        act_inst_cls, act_cont_cls, act_back_cls,\
-        act_inst_feat, act_cont_feat, act_back_feat,\
-        temp_att, act_inst_cas, act_cas, act_cont_cas, act_back_cas=model.forward_cas_map(src_input_feature)
 
-        src_weak_loss, src_weak_loss_dict = criterion(act_inst_cls, act_cont_cls, act_back_cls, src_vid_label_t, temp_att,\
-                                    act_inst_feat, act_cont_feat, act_back_feat, act_inst_cas) 
-
-        # Strong supervision learning
-        start, end = model.forward_strong_sup(src_input_feature)
-        src_strg_loss = strg_criterion(start,end,label_start, label_end)[0]
+        tgt_act_inst_cls,tgt_act_cont_cls, tgt_act_back_cls,tgt_act_inst_feat,\
+        tgt_act_cont_feat, tgt_act_back_feat,tgt_temp_att, tgt_act_inst_cas,\
+        src_act_inst_cls, src_act_cont_cls, src_act_back_cls,\
+        src_act_inst_feat, src_act_cont_feat, src_act_back_feat,\
+        src_temp_att, src_act_inst_cas, src_act_cas,\
+        src_start, src_end, contrast_pairs, pred_d, label_d =\
+            model(src_input_feature, tgt_input_feature, src_bkg_feat, src_act_feat)
         
+        # === Weak-supervised learning on target domain ===
+        tgt_loss, tgt_loss_dict = criterion(tgt_act_inst_cls, tgt_act_cont_cls, tgt_act_back_cls, tgt_vid_label_t, tgt_temp_att,\
+                                    tgt_act_inst_feat, tgt_act_cont_feat, tgt_act_back_feat, tgt_act_inst_cas)
+
+        # === Combined learning on source domain ===
+        # Weak supervision learning
+        src_weak_loss, _ = criterion(src_act_inst_cls, src_act_cont_cls, src_act_back_cls, src_vid_label_t, src_temp_att,\
+                                    src_act_inst_feat, src_act_cont_feat, src_act_back_feat, src_act_inst_cas) 
+        
+        # Strong supervision learning
+        src_strg_loss = strg_criterion(src_start,src_end,label_start, label_end)[0]
         src_loss = src_weak_loss + src_strg_loss
 
         # Feature alignment
 
-        actionness = act_cas.sum(dim=2)
-        contrast_pairs = model.create_contrast_pairs(tgt_input_feature,src_bkg_feat,src_act_feat)
+        actionness = src_act_cas.sum(dim=2)
         snip_loss = da_bkg_snip_criterion(contrast_pairs)
 
         #Domain adversarial learning
-        pred_d, label_d = model.forward_dom_pred(src_input_feature,tgt_input_feature, reverse=False)
         loss_adv = 0
         num_class_domain = pred_d.size(2)
         pred_d = pred_d.squeeze(1)
@@ -431,22 +473,35 @@ def test(args, model, dataloader, criterion, phase="test"):
     test_pred_score_stack = []
     test_vid_label_stack = []
     test_tmp_data_log_dict = {}
-    
-    for vid_name, input_feature, vid_label_t, vid_len, vid_duration in tqdm(dataloader):
-        
+
+    #for vid_name, input_feature, vid_label_t, vid_len, vid_duration in tqdm(dataloader):
+    for vid_idx, vid_data in tqdm(dataloader):
+        (vid_name,input_feature,vid_label_t,vid_len,vid_duration) = vid_data
+
+
+
         input_feature = input_feature.to(device)
         vid_label_t = vid_label_t.to(device)
         vid_len = vid_len[0].cpu().numpy()
         t_factor = (args.segment_frames_num * vid_len) / (args.frames_per_sec * args.test_upgrade_scale  * input_feature.shape[1])
         #--------------------------------------------------------------------------#
         #--------------------------------------------------------------------------#
-        act_inst_cls, act_cont_cls, act_back_cls,\
-        act_inst_feat, act_cont_feat, act_back_feat,\
-        temp_att, act_inst_cas, act_cas, act_cont_cas, act_back_cas = model.forward_cas_map(input_feature)
+        if(args.train_mode) == "da":
+            act_inst_cls, act_cont_cls, act_back_cls,\
+            act_inst_feat, act_cont_feat, act_back_feat,\
+            temp_att, act_inst_cas, act_cas, act_cont_cas, act_back_cas = model(input_feature,99,99,99,1)
+        elif(args.train_mode) == "source":
+            act_inst_cls, act_cont_cls, act_back_cls,\
+            act_inst_feat, act_cont_feat, act_back_feat,\
+            temp_att, act_inst_cas, act_cas, act_cont_cas, act_back_cas=model(input_feature,1)
+        elif(args.train_mode) == "bmn":
+            act_inst_cls, act_cont_cls, act_back_cls,\
+            act_inst_feat, act_cont_feat, act_back_feat,\
+            temp_att, act_inst_cas, act_cas, act_cont_cas, act_back_cas=model(input_feature,1)
         #--------------------------------------------------------------------------#
         #--------------------------------------------------------------------------#
         loss, loss_dict = criterion(act_inst_cls, act_cont_cls, act_back_cls, vid_label_t, temp_att,\
-                                    act_inst_feat, act_cont_feat, act_back_feat, act_inst_cas) 
+        act_inst_feat, act_cont_feat, act_back_feat, act_inst_cas) 
               
         loss_stack.append(loss.cpu().item())
         act_inst_loss_stack.append(loss_dict["act_inst_loss"])
@@ -612,6 +667,118 @@ def test(args, model, dataloader, criterion, phase="test"):
         
     return test_log_dict, test_tmp_data_log_dict
 
+
+def test_bmn(args, model, dataloader, criterion, phase="test"):
+    
+    model.eval()
+    print("-------------------------------------------------------------------------------")
+    save_dir = args.save_dir
+
+    device = args.device
+    
+    loss_stack = 0
+    tem_loss_stack = 0
+    pem_reg_loss_stack = 0
+    pem_cls_loss_stack = 0
+    
+    test_final_result = dict()
+    test_final_result['version'] = 'VERSION 1.3'
+    test_final_result['results'] = {}
+    test_final_result['external_data'] = {'used': True, 'details': 'Features from I3D Net'}
+    bm_mask = get_mask(args.sample_segments_num)
+    
+    for vid_idx, vid_data in enumerate(tqdm(dataloader)):
+
+        (vid_nam,input_feature,vid_label_t,gt_iou_map, label_start, label_end,vid_len,vid_duration) = vid_data
+        #device = input_feature.device
+        bm_mask = bm_mask.cuda()
+        #vid_label_t = vid_label_t.to(device)
+        gt_iou_map = gt_iou_map.cuda()
+        input_feature = input_feature.to(device)
+
+        src_start, src_end, confidence_map=model(input_feature)
+        loss = criterion(confidence_map,src_start,src_end,gt_iou_map,label_start, label_end, bm_mask)
+        #if(((np.isnan(src_start.sum().cpu().detach().numpy()) | \
+        #    np.isnan(src_end.sum().cpu().detach().num1py())) | \
+        #        np.isnan(confidence_map.sum().cpu().detach().numpy()))):
+        #if(((np.isnan(gt_iou_map.sum().cpu().detach().numpy()) | \
+        #    np.isnan(label_start.sum().cpu().detach().numpy())) | \
+        #        np.isnan(label_end.sum().cpu().detach().numpy()))):
+        
+        #    print(vid_idx)
+        #    print(confidence_map.sum())
+        #loss_stack.append(loss[0].cpu().detach().numpy())
+        #tem_loss_stack.append(loss[1].cpu().detach().numpy())
+        #pem_reg_loss_stack.append(loss[2].cpu().detach().numpy())
+        #pem_cls_loss_stack.append(loss[3].cpu().detach().numpy())
+        #print(confidence_map.sum())
+        #print(loss)
+        
+        if not torch.isnan(loss[0].sum()):
+
+            loss_stack += loss[0].cpu().detach().numpy()
+            tem_loss_stack += loss[1].cpu().detach().numpy()
+            pem_reg_loss_stack += loss[2].cpu().detach().numpy()
+            pem_cls_loss_stack += loss[3].cpu().detach().numpy()
+            
+        
+       
+    print("")
+    print("total loss:{:.3f}".format( loss_stack/(vid_idx+1) ))
+    print("tem_loss:{:.3f}".format(tem_loss_stack/(vid_idx+1) ))
+    print("pem_reg_loss:{:.3f}".format(pem_reg_loss_stack/(vid_idx+1) ))
+    print("pem_cls_loss:{:.3f}".format(pem_cls_loss_stack/(vid_idx+1) ))
+    print("-------------------------------------------------------------------------------")
+    
+    test_log_dict = {}
+    test_log_dict["total_loss"] = loss_stack/(vid_idx+1)
+    test_log_dict["tem_loss"] = tem_loss_stack/(vid_idx+1)
+    test_log_dict["pem_reg_loss"] = pem_reg_loss_stack/(vid_idx+1)
+    test_log_dict["pem_cls_loss"] = pem_cls_loss_stack/(vid_idx+1)
+        
+    return test_log_dict
+
+
+def BMN_inference(args,model,test_loader):
+    tscale = args.sample_segments_num
+    with torch.no_grad():
+        for idx, video_data in enumerate(tqdm(test_loader)):
+            video_name = video_data[0]
+            input_data = video_data[1]
+            #video_name = test_loader.dataset.video_list[idx[0]]
+            #input_data = input_data.cuda()
+            start, end, confidence_map = model(input_data)
+
+            # print(start.shape,end.shape,confidence_map.shape)
+            start_scores = start[0].detach().cpu().numpy()
+            end_scores = end[0].detach().cpu().numpy()
+            clr_confidence = (confidence_map[0][1]).detach().cpu().numpy()
+            reg_confidence = (confidence_map[0][0]).detach().cpu().numpy()
+
+            
+            # 遍历起始分界点与结束分界点的组合
+            new_props = []
+            for idx in range(tscale):
+                for jdx in range(tscale):
+                    start_index = idx
+                    end_index = jdx + 1
+                    if start_index < end_index and  end_index<tscale :
+                        xmin = start_index / tscale
+                        xmax = end_index / tscale
+                        xmin_score = start_scores[start_index]
+                        xmax_score = end_scores[end_index]
+                        clr_score = clr_confidence[idx, jdx]
+                        reg_score = reg_confidence[idx, jdx]
+                        score = xmin_score * xmax_score * clr_score * reg_score
+                        new_props.append([xmin, xmax, xmin_score, xmax_score, clr_score, reg_score, score])
+            new_props = np.stack(new_props)
+            #########################################################################
+
+            col_name = ["xmin", "xmax", "xmin_score", "xmax_score", "clr_score", "reg_socre", "score"]
+            new_df = pd.DataFrame(new_props, columns=col_name)
+            new_df.to_csv("./output/BMN_results/" + video_name[0] + ".csv", index=False)
+
+
 """   
 #---------------------------------------------------------------------------------------------------------------#
 #---------------------------------------------------------------------------------------------------------------#
@@ -640,7 +807,16 @@ def main(args):
     if not os.path.isdir(save_dir):
         os.makedirs(save_dir)
         
-    model = ACMNet_da(args)
+    #model = ACMNet_da(args)
+    if args.train_mode == "source":
+        model = ACMNet_src(args)
+    elif args.train_mode == "bmn":
+        model = ACMNet_bmn(args)
+    else:
+        model = ACMNet_da(args)
+
+    if args.gpu_mode == "multi_gpu":
+        model = nn.DataParallel(model, device_ids=[0, 1, 2])
     
     if args.checkpoint is not None and os.path.isfile(args.checkpoint):
         checkpoint = torch.load(args.checkpoint, map_location=torch.device("cpu"))
@@ -657,7 +833,9 @@ def main(args):
                     project="ACMNet_{}".format(args.dataset),
                     sync_tensorboard=True)
             
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
+        #optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
+        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), \
+            lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
         # optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=0.0005)
         
         """
@@ -666,9 +844,16 @@ def main(args):
         -----------------
         
         """
-        tgt_dataset = build_tgt_dataset(args, phase="train", sample="random")  #random enable linear interpolation
-        src_dataset = build_src_dataset(args, phase="train", sample="random") #random enable linear interpolation
-        test_dataset = build_tgt_dataset(args, phase="test", sample="uniform") 
+        #tgt_dataset = build_tgt_dataset(args, phase="train", sample="random")  #random enable linear interpolation
+        #src_dataset = build_src_dataset(args, phase="train", sample="random") #random enable linear interpolation
+        tgt_dataset = build_tgt_dataset(args, phase="train", sample="interpolate")  #random enable linear interpolation
+        src_dataset = build_src_dataset(args, phase="train", sample="interpolate") #random enable linear interpolation
+        
+        if args.train_mode == "bmn":
+            test_dataset = build_src_dataset(args, phase="test", sample="interpolate", get_bound=True) 
+        else:
+            #test_dataset = build_tgt_dataset(args, phase="test", sample="uniform") 
+            test_dataset = build_tgt_dataset(args, phase="test", sample="interpolate") 
             
         # source train dataloader
         tgt_dataloader = DataLoader(tgt_dataset, batch_size=args.batch_size, shuffle=True, 
@@ -693,6 +878,7 @@ def main(args):
 
         
         best_test_mAP = 0
+        best_test_loss = 999999
 
         # debug for source only
         #train_dataloader = src_dataloader
@@ -701,11 +887,58 @@ def main(args):
         for epoch_idx in tqdm(range(args.start_epoch, args.epochs)):
         
             #if args.train_mode=="source_only":
-            #    train_log_dict = train_source(args, model, tgt_dataloader, src_criterion_weak_spv,src_criterion_strg_spv, optimizer)
+            #    train_log_dict = train_source(args, model, src_dataloader, src_criterion_weak_spv,src_criterion_strg_spv, optimizer)
             #elif args.train_mode == "with_da":
-            train_log_dict = train_da(args, model, tgt_dataloader, src_dataloader, src_criterion_weak_spv,src_criterion_strg_spv, da_bkg_snip_criterion, optimizer)
+            if args.train_mode == 'da':
+                train_log_dict = train_da(args, model, tgt_dataloader, src_dataloader, src_criterion_weak_spv,src_criterion_strg_spv, da_bkg_snip_criterion, optimizer)
+            elif args.train_mode == 'source':
+                train_log_dict = train_source(args, model, src_dataloader, src_criterion_weak_spv,src_criterion_strg_spv, optimizer)
+            elif args.train_mode == 'bmn':
+                train_log_dict = train_bmn(args, model, src_dataloader, src_criterion_weak_spv,src_criterion_strg_spv, optimizer,epoch_idx)                
             
             if epoch_idx %2 == 0:
+                if args.train_mode =='bmn':
+                    test_final_json_path = os.path.join(save_dir, "{}_lateset_result.json".format(args.dataset))
+                    with torch.no_grad():
+                        test_log_dict =  test_bmn(args,model,test_dataloader,src_criterion_strg_spv)
+                        test_loss = test_log_dict['total_loss']
+
+                    if test_loss < best_test_loss:
+                        best_test_loss =  test_loss
+                        checkpoint_file = "{}_best_checkpoint.pth".format(args.dataset)
+                        torch.save({
+                            'epoch':epoch_idx,
+                            'model_state_dict':model.state_dict()
+                            }, os.path.join(save_dir, checkpoint_file))
+                        if args.train_mode != 'bmn':                   
+                            with open(os.path.join(save_dir, "test_tmp_data_log_dict.pickle"), "wb") as f:
+                                pickle.dump(test_tmp_data_log_dict, f)
+
+                    checkpoint_file = "{}_latest_checkpoint.pth".format(args.dataset)
+                    torch.save({
+                        'epoch':epoch_idx,
+                        'model_state_dict':model.state_dict()
+                        }, os.path.join(save_dir, checkpoint_file))
+                    
+                    
+                    if not args.without_wandb:
+                        wandb.log(train_log_dict)
+                        wandb.log(test_log_dict)
+
+                    if epoch_idx %4 == 0:
+                        BMN_inference(args, model, test_dataloader)
+                        anet_detection = ANETDetection(ground_truth_file=args.src_test_gt_file_path,
+                        prediction_file=test_final_json_path,
+                        tiou_thresholds=args.tiou_thresholds,
+                        subset="val")
+                        test_mAP = anet_detection.evaluate()
+                        if test_mAP > best_test_mAP:
+                            best_test_mAP = test_mAP
+                        
+                        print("Current test_mAP:{:.4f}, Current Best test_mAP:{:.4f} Current Epoch:{}/{}".format(test_mAP, best_test_mAP, epoch_idx, args.epochs))
+                
+                    continue
+
                 with torch.no_grad():
                     test_log_dict, test_tmp_data_log_dict = test(args, model, test_dataloader, tgt_criterion)
                     test_mAP = test_log_dict["test_mAP"]
@@ -739,6 +972,7 @@ def main(args):
         test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False,
                                     num_workers=args.num_workers, drop_last=False)
         criterion = ACMLoss()
+        criterion_bmn = BMNLoss()
         
         with torch.no_grad():
             test_log_dict, test_tmp_data_log_dict = test(args, model, test_dataloader, criterion)
@@ -844,6 +1078,10 @@ def generate_proposal(temp_cas, temp_att, score_np, test_tmp_data_log_dict, vid_
 if __name__ == "__main__":
     
     set_random_seed()
-    args = build_args(dataset="HACStoAct")
+    #args = build_args(dataset="HACStoAct")
+    args = build_args()
+    if(args.train_mode=='source'):
+        args.src_data_dir="/mnt/server10_hard2/adi/Datasets/ActivityNet1-3_ACMfeat"
+        args.src_test_gt_file="/mnt/server10_hard2/adi/Datasets/ActivityNet1-3_ACMfeat/gt.json"
     print(args)
     main(args)
